@@ -47,6 +47,7 @@
   <button id="callBtn" onclick="startCall()">📞 Call</button>
   <button id="endBtn" class="red hide" onclick="endCall(true)">Call Katt Karo</button>
   <div id="status"></div>
+  <button id="notifBtn" class="hide" onclick="setupPush()">🔔 Notification chalu karo</button>
   <div id="incoming" class="hide">
     <p>Incoming call: <b id="from"></b></p>
     <button onclick="acceptCall()">Utha Lo</button>
@@ -139,13 +140,58 @@ function initPhone(){
     $('pad').appendChild(b);
   });
   socket = io(SERVER||undefined,{auth:{token}});
-  socket.on('incoming', ({from,offer})=>{ peer=from; pendingOffer=offer;
-    $('from').textContent=from; $('incoming').classList.remove('hide'); $('callBtn').classList.add('hide'); });
-  socket.on('answered', async({answer})=>{ await pc.setRemoteDescription(answer); $('status').textContent='Connected ✅'; });
-  socket.on('ice', async({candidate})=>{ try{ pc&&await pc.addIceCandidate(candidate);}catch(e){} });
+  setupPush();
+  socket.on('incoming', ({from,offer})=>{ peer=from; pendingOffer=offer; iceQ=[];
+    $('from').textContent=from; $('incoming').classList.remove('hide'); $('callBtn').classList.add('hide');
+    startRing();
+    if(document.hidden && 'serviceWorker' in navigator){
+      navigator.serviceWorker.ready.then(r=>r.showNotification('📞 Incoming call',{body:from+' call kar raha hai',tag:'call',renotify:true,requireInteraction:true,vibrate:[500,200,500],icon:'/icon-192.png'})).catch(()=>{});
+    } });
+  socket.on('answered', async({answer})=>{ await pc.setRemoteDescription(answer); await flushIce(); $('status').textContent='Connected ✅'; });
+  socket.on('ice', async({candidate})=>{
+    if(pc && pc.remoteDescription){ try{ await pc.addIceCandidate(candidate);}catch(e){} } else iceQ.push(candidate); });
   socket.on('hangup', ()=>endCall(false));
   socket.on('connect_error', e=>{ if(e.message==='auth') logout(); });
   socket.on('unavailable', n=>{ $('status').textContent='Number '+n+' abhi online nahi hai'; endCall(false); });
+}
+
+let iceQ=[];
+async function flushIce(){ const q=iceQ; iceQ=[]; for(const c of q){ try{ await pc.addIceCandidate(c);}catch(e){} } }
+
+// ----- Ringtone (app ke andar) -----
+let actx, ringTimer, ringing=false;
+function unlockAudio(){ try{ actx=actx||new (window.AudioContext||window.webkitAudioContext)(); if(actx.state==='suspended') actx.resume(); }catch(e){} }
+['click','touchstart'].forEach(ev=>document.addEventListener(ev,unlockAudio,{passive:true}));
+function tone(f,start,dur){
+  if(!actx) return;
+  const o=actx.createOscillator(), g=actx.createGain();
+  o.type='sine'; o.frequency.value=f; o.connect(g); g.connect(actx.destination);
+  const t=actx.currentTime+start;
+  g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.35,t+0.02); g.gain.linearRampToValueAtTime(0,t+dur);
+  o.start(t); o.stop(t+dur+0.05);
+}
+function ringOnce(){
+  [880,660,880,660,880,660].forEach((f,i)=>tone(f,i*0.18,0.16));
+  if(navigator.vibrate) try{ navigator.vibrate([500,250,500]); }catch(e){}
+}
+function startRing(){ if(ringing) return; ringing=true; unlockAudio(); ringOnce(); ringTimer=setInterval(ringOnce,2200); }
+function stopRing(){ ringing=false; clearInterval(ringTimer); if(navigator.vibrate) try{ navigator.vibrate(0); }catch(e){} }
+
+// ----- Push notification (app band hone par) -----
+const urlB64=s=>{ const p='='.repeat((4-s.length%4)%4); const b=(s+p).replace(/-/g,'+').replace(/_/g,'/'); const r=atob(b); return Uint8Array.from([...r].map(c=>c.charCodeAt(0))); };
+async function setupPush(){
+  try{
+    if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window)) return;
+    const k=(await (await api('/api/vapid')).json()).key;
+    if(!k) return;
+    if(Notification.permission==='default') await Notification.requestPermission();
+    if(Notification.permission!=='granted'){ $('notifBtn').classList.remove('hide'); return; }
+    $('notifBtn').classList.add('hide');
+    const reg=await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:urlB64(k)});
+    await api('/api/subscribe','POST',{sub});
+  }catch(e){ console.log('push',e); }
 }
 
 async function setupPC(){
@@ -167,8 +213,10 @@ async function startCall(){
 }
 
 async function acceptCall(){
+  stopRing();
   try{ await setupPC(); }catch(e){ return $('status').textContent='Mic permission do'; }
   await pc.setRemoteDescription(pendingOffer);
+  await flushIce();
   const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
   socket.emit('answer',{to:peer,answer});
   $('incoming').classList.add('hide'); $('endBtn').classList.remove('hide');
@@ -176,6 +224,7 @@ async function acceptCall(){
 }
 
 function endCall(notify){
+  stopRing(); iceQ=[];
   if(notify && peer) socket.emit('hangup',{to:peer});
   pc && pc.close(); pc=null;
   localStream && localStream.getTracks().forEach(t=>t.stop());
