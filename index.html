@@ -37,7 +37,7 @@
   <input id="np" placeholder="User password">
   <button onclick="createUser()">User Banao (3-digit number milega)</button>
   <div id="list"></div>
-  <button class="red" onclick="location.reload()">Logout</button>
+  <button class="red" onclick="logout()">Logout</button>
 </div>
 
 <div id="phone" class="box hide">
@@ -52,7 +52,7 @@
     <button onclick="acceptCall()">Utha Lo</button>
     <button class="red" onclick="endCall(true)">Reject</button>
   </div>
-  <button class="red" onclick="location.reload()">Logout</button>
+  <button class="red" onclick="logout()">Logout</button>
   <audio id="remote" autoplay></audio>
 </div>
 
@@ -66,6 +66,15 @@ const api = (path, method='GET', body) => fetch(SERVER+path, {
   method, headers:{'Content-Type':'application/json', Authorization: token||''},
   body: body?JSON.stringify(body):undefined });
 
+function enter(d){
+  token = d.token; $('login').classList.add('hide');
+  if(d.role==='admin'){ $('admin').classList.remove('hide'); loadUsers(); }
+  else { $('phone').classList.remove('hide'); $('me').textContent = d.number; initPhone(); }
+}
+function logout(){
+  try{ localStorage.removeItem('cs_session'); }catch(e){}
+  location.reload();
+}
 async function login(){
   $('err').textContent='';
   let r,d;
@@ -73,14 +82,35 @@ async function login(){
     r = await api('/api/login','POST',{id:$('id').value.trim(), pass:$('pass').value.trim()});
     d = await r.json();
   }catch(e){
-    $('err').textContent='Server se connect nahi ho pa raha. Server chalu hai? App ko server ke https link se kholo (file se nahi).';
+    $('err').textContent='Server se connect nahi ho pa raha. Thodi der baad dobara try karo.';
     return;
   }
   if(!r.ok){ $('err').textContent = d.error||'Login fail'; return; }
-  token = d.token; $('login').classList.add('hide');
-  if(d.role==='admin'){ $('admin').classList.remove('hide'); loadUsers(); }
-  else { $('phone').classList.remove('hide'); $('me').textContent = d.number; initPhone(); }
+  try{ localStorage.setItem('cs_session', JSON.stringify({token:d.token})); }catch(e){}
+  enter(d);
 }
+// App dobara khulne par apne aap login
+(async function resume(){
+  let s=null;
+  try{ s=JSON.parse(localStorage.getItem('cs_session')||'null'); }catch(e){}
+  if(!s||!s.token) return;
+  token=s.token;
+  $('login').classList.add('hide');
+  const note=document.createElement('p'); note.id='wait'; note.textContent='Login ho raha hai...';
+  document.body.appendChild(note);
+  for(let i=0;i<15;i++){
+    try{
+      const r=await api('/api/me');
+      if(r.ok){ const d=await r.json(); note.remove(); return enter({token:s.token,role:d.role,number:d.number}); }
+      try{ localStorage.removeItem('cs_session'); }catch(e){}
+      note.remove(); $('login').classList.remove('hide'); return;
+    }catch(e){
+      note.textContent='Server jag raha hai, 1 minute tak wait karo...';
+      await new Promise(r=>setTimeout(r,5000));
+    }
+  }
+  note.remove(); $('login').classList.remove('hide');
+})();
 
 async function loadUsers(){
   const users = await (await api('/api/users')).json();
@@ -114,6 +144,7 @@ function initPhone(){
   socket.on('answered', async({answer})=>{ await pc.setRemoteDescription(answer); $('status').textContent='Connected ✅'; });
   socket.on('ice', async({candidate})=>{ try{ pc&&await pc.addIceCandidate(candidate);}catch(e){} });
   socket.on('hangup', ()=>endCall(false));
+  socket.on('connect_error', e=>{ if(e.message==='auth') logout(); });
   socket.on('unavailable', n=>{ $('status').textContent='Number '+n+' abhi online nahi hai'; endCall(false); });
 }
 
