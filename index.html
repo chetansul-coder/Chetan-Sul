@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chetan Sul</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#1b2a38">
+<link rel="icon" href="/icon-192.png">
+<style>
+  body{font-family:sans-serif;margin:0;background:#101820;color:#fff;text-align:center}
+  h1{font-size:20px;padding:14px;margin:0;background:#1b2a38}
+  .box{padding:16px;max-width:400px;margin:auto}
+  input,button{width:100%;padding:12px;margin:6px 0;font-size:16px;border-radius:8px;border:0;box-sizing:border-box}
+  button{background:#2ea043;color:#fff}
+  button.red{background:#d33}
+  #display{font-size:36px;letter-spacing:6px;min-height:48px;margin:10px 0}
+  .pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .pad button{background:#2b3a49;font-size:22px}
+  .row{display:flex;justify-content:space-between;background:#1b2a38;padding:8px;border-radius:8px;margin:4px 0}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<h1>📞 Chetan Sul</h1>
+
+<div id="login" class="box">
+  <input id="id" placeholder="ID (admin ya user ka naam)">
+  <input id="pass" type="password" placeholder="Password">
+  <button onclick="login()">Login</button>
+  <p id="err" style="color:#f66"></p>
+</div>
+
+<div id="admin" class="box hide">
+  <h3>Admin Panel</h3>
+  <input id="nn" placeholder="Naya user naam">
+  <input id="np" placeholder="User password">
+  <button onclick="createUser()">User Banao (3-digit number milega)</button>
+  <div id="list"></div>
+  <button class="red" onclick="location.reload()">Logout</button>
+</div>
+
+<div id="phone" class="box hide">
+  <div>Aapka number: <b id="me"></b></div>
+  <div id="display"></div>
+  <div class="pad" id="pad"></div>
+  <button id="callBtn" onclick="startCall()">📞 Call</button>
+  <button id="endBtn" class="red hide" onclick="endCall(true)">Call Katt Karo</button>
+  <div id="status"></div>
+  <div id="incoming" class="hide">
+    <p>Incoming call: <b id="from"></b></p>
+    <button onclick="acceptCall()">Utha Lo</button>
+    <button class="red" onclick="endCall(true)">Reject</button>
+  </div>
+  <button class="red" onclick="location.reload()">Logout</button>
+  <audio id="remote" autoplay></audio>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+let token, socket, pc, localStream, peer, pendingOffer;
+const SERVER = '';  // APK me yahan apne server ka https URL daalna, jaise 'https://myapp.onrender.com'
+const api = (path, method='GET', body) => fetch(SERVER+path, {
+  method, headers:{'Content-Type':'application/json', Authorization: token||''},
+  body: body?JSON.stringify(body):undefined });
+
+async function login(){
+  $('err').textContent='';
+  let r,d;
+  try{
+    r = await api('/api/login','POST',{id:$('id').value.trim(), pass:$('pass').value.trim()});
+    d = await r.json();
+  }catch(e){
+    $('err').textContent='Server se connect nahi ho pa raha. Server chalu hai? App ko server ke https link se kholo (file se nahi).';
+    return;
+  }
+  if(!r.ok){ $('err').textContent = d.error||'Login fail'; return; }
+  token = d.token; $('login').classList.add('hide');
+  if(d.role==='admin'){ $('admin').classList.remove('hide'); loadUsers(); }
+  else { $('phone').classList.remove('hide'); $('me').textContent = d.number; initPhone(); }
+}
+
+async function loadUsers(){
+  const users = await (await api('/api/users')).json();
+  $('list').innerHTML = users.map(u =>
+    `<div class="row"><span>${u.number} - ${u.name}</span><span onclick="delUser('${u.number}')">🗑</span></div>`).join('');
+}
+async function createUser(){
+  const r = await api('/api/users','POST',{name:$('nn').value.trim(), pass:$('np').value});
+  const d = await r.json();
+  if(!r.ok) return alert(d.error);
+  alert('User ban gaya. Number: '+d.number);
+  $('nn').value=''; $('np').value=''; loadUsers();
+}
+async function delUser(n){ await api('/api/users/'+n,'DELETE'); loadUsers(); }
+
+// ---------- Phone ----------
+const ICE = { iceServers:[{urls:'stun:stun.l.google.com:19302'}] };
+
+function initPhone(){
+  ['1','2','3','4','5','6','7','8','9','⌫','0','C'].forEach(k=>{
+    const b=document.createElement('button'); b.textContent=k;
+    b.onclick=()=>{ const d=$('display');
+      if(k==='⌫') d.textContent=d.textContent.slice(0,-1);
+      else if(k==='C') d.textContent='';
+      else if(d.textContent.length<3) d.textContent+=k; };
+    $('pad').appendChild(b);
+  });
+  socket = io(SERVER||undefined,{auth:{token}});
+  socket.on('incoming', ({from,offer})=>{ peer=from; pendingOffer=offer;
+    $('from').textContent=from; $('incoming').classList.remove('hide'); $('callBtn').classList.add('hide'); });
+  socket.on('answered', async({answer})=>{ await pc.setRemoteDescription(answer); $('status').textContent='Connected ✅'; });
+  socket.on('ice', async({candidate})=>{ try{ pc&&await pc.addIceCandidate(candidate);}catch(e){} });
+  socket.on('hangup', ()=>endCall(false));
+  socket.on('unavailable', n=>{ $('status').textContent='Number '+n+' abhi online nahi hai'; endCall(false); });
+}
+
+async function setupPC(){
+  localStream = await navigator.mediaDevices.getUserMedia({audio:true});
+  pc = new RTCPeerConnection(ICE);
+  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+  pc.ontrack = e => { $('remote').srcObject = e.streams[0]; };
+  pc.onicecandidate = e => e.candidate && socket.emit('ice',{to:peer,candidate:e.candidate});
+}
+
+async function startCall(){
+  peer = $('display').textContent;
+  if(peer.length!==3) return $('status').textContent='3 digit number daalo';
+  try{ await setupPC(); }catch(e){ return $('status').textContent='Mic permission do'; }
+  const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+  socket.emit('call',{to:peer,offer});
+  $('status').textContent='Ringing...';
+  $('callBtn').classList.add('hide'); $('endBtn').classList.remove('hide');
+}
+
+async function acceptCall(){
+  try{ await setupPC(); }catch(e){ return $('status').textContent='Mic permission do'; }
+  await pc.setRemoteDescription(pendingOffer);
+  const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+  socket.emit('answer',{to:peer,answer});
+  $('incoming').classList.add('hide'); $('endBtn').classList.remove('hide');
+  $('status').textContent='Connected ✅';
+}
+
+function endCall(notify){
+  if(notify && peer) socket.emit('hangup',{to:peer});
+  pc && pc.close(); pc=null;
+  localStream && localStream.getTracks().forEach(t=>t.stop());
+  $('incoming').classList.add('hide'); $('endBtn').classList.add('hide'); $('callBtn').classList.remove('hide');
+  if(!$('status').textContent.includes('online nahi')) $('status').textContent='';
+  peer=null;
+}
+</script>
+</body>
+</html>
