@@ -10,7 +10,10 @@ const save = () => fs.writeFileSync(DB, JSON.stringify(users, null, 1));
 
 const app = express();
 app.use(express.json());
-app.use(express.static('public'));
+   const path = require('path');
+   ['index.html','manifest.json','sw.js','icon-192.png','icon-512.png'].forEach(f =>
+     app.get('/' + f, (q, r) => r.sendFile(path.join(__dirname, f))));
+   app.get('/', (q, r) => r.sendFile(path.join(__dirname, 'index.html')));
 
 const tokens = {};
 const rnd = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
